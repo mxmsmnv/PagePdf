@@ -1,0 +1,29 @@
+{
+    "name": "maxim-alex/page-pdf",
+    "description": "ProcessWire module for generating PDF documents with full UTF-8/Cyrillic support",
+    "type": "processwire-module",
+    "keywords": ["processwire", "pdf", "mpdf", "document", "generator"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Maxim Semenov",
+            "email": "maxim@smnv.org"
+        }
+    ],
+    "require": {
+        "php": ">=8.0",
+        "mpdf/mpdf": "^8.0"
+    },
+    "suggest": {
+        "dompdf/dompdf": "Alternative PDF engine"
+    },
+    "autoload": {
+        "psr-4": {
+            "ProcessWire\\": ""
+        }
+    },
+    "config": {
+        "vendor-dir": "vendor",
+        "optimize-autoloader": true
+    }
+}

@@ -1,0 +1,426 @@
+<?php namespace ProcessWire;
+
+/**
+ * PagePdf setup wizard for the ProcessWire admin.
+ */
+class ProcessPagePdfWizard extends Process {
+
+    const TEMPLATE_NAME = 'pdf-generator';
+    const PAGE_NAME = 'pdf';
+
+    public static function getModuleInfo() {
+        return [
+            'title' => 'PagePdf Wizard',
+            'summary' => 'Guided setup for the PagePdf module.',
+            'version' => '3.0.0',
+            'author' => 'Maxim Semenov',
+            'requires' => 'PagePdf',
+            'permission' => 'module-admin',
+            'icon' => 'file-pdf-o',
+            'page' => [
+                'name' => 'pagepdf-wizard',
+                'title' => 'PagePdf Wizard',
+                'parent' => 'setup',
+            ],
+        ];
+    }
+
+    public function ___execute() {
+        return $this->renderStepNav('status') .
+            $this->renderStatus() .
+            $this->renderActions();
+    }
+
+    public function ___executeSettings() {
+        $form = $this->buildSettingsForm();
+
+        if($this->input->post('submit_settings')) {
+            $form->processInput($this->input->post);
+
+            if(!count($form->getErrors())) {
+                $this->savePdfConfig($form);
+                $this->message($this->_('PagePdf settings saved.'));
+                $this->session->redirect($this->page->url . 'settings/');
+            }
+        }
+
+        return $this->renderStepNav('settings') . $form->render();
+    }
+
+    public function ___executeSetup() {
+        if($this->input->post('setup_all')) {
+            $this->runSetup();
+            $this->session->redirect($this->page->url . 'setup/');
+        }
+
+        return $this->renderStepNav('setup') .
+            $this->renderSetupStatus() .
+            $this->renderSetupForm();
+    }
+
+    public function ___executeTest() {
+        return $this->renderStepNav('test') . $this->renderTestForm();
+    }
+
+    protected function renderStepNav($active) {
+        $steps = [
+            'status' => [$this->_('Status'), $this->page->url],
+            'settings' => [$this->_('Settings'), $this->page->url . 'settings/'],
+            'setup' => [$this->_('Generator'), $this->page->url . 'setup/'],
+            'test' => [$this->_('Test'), $this->page->url . 'test/'],
+        ];
+
+        $out = '<div class="Inputfields"><div class="Inputfield InputfieldMarkup"><div class="InputfieldContent">';
+        $out .= '<p class="notes">';
+
+        foreach($steps as $name => $step) {
+            list($label, $url) = $step;
+            $class = $name === $active ? 'ui-state-active' : 'ui-state-default';
+            $out .= '<a class="ui-button ' . $class . '" href="' . $this->esc($url) . '">' . $label . '</a> ';
+        }
+
+        $out .= '</p></div></div></div>';
+
+        return $out;
+    }
+
+    protected function renderStatus() {
+        $pdf = $this->getPdfModule();
+        $items = [
+            $this->_('PagePdf module') => $pdf ? $this->_('Installed') : $this->_('Not installed'),
+            $this->_('mPDF') => $this->classExists('\Mpdf\Mpdf') ? $this->_('Installed') : $this->_('Not installed'),
+            $this->_('Dompdf') => $this->classExists('\Dompdf\Dompdf') ? $this->_('Installed') : $this->_('Optional, not installed'),
+            $this->_('Generator template file') => $this->generatorFileExists() ? $this->_('Ready') : $this->_('Missing'),
+            $this->_('Generator template') => $this->generatorTemplateExists() ? $this->_('Ready') : $this->_('Missing'),
+            $this->_('Generator page') => $this->generatorPageExists() ? $this->getGeneratorPageUrl() : $this->_('Missing'),
+        ];
+
+        $out = '<h2>' . $this->_('PagePdf setup status') . '</h2>';
+        $out .= '<table class="AdminDataTable AdminDataList"><tbody>';
+
+        foreach($items as $label => $value) {
+            $out .= '<tr><th>' . $this->esc($label) . '</th><td>' . $this->esc($value) . '</td></tr>';
+        }
+
+        $out .= '</tbody></table>';
+
+        return $out;
+    }
+
+    protected function renderActions() {
+        $out = '<p>';
+        $out .= '<a class="ui-button ui-priority-primary" href="' . $this->esc($this->page->url . 'settings/') . '">' . $this->_('Configure settings') . '</a> ';
+        $out .= '<a class="ui-button" href="' . $this->esc($this->page->url . 'setup/') . '">' . $this->_('Create generator') . '</a> ';
+        $out .= '<a class="ui-button" href="' . $this->esc($this->page->url . 'test/') . '">' . $this->_('Test PDF') . '</a>';
+        $out .= '</p>';
+
+        return $out;
+    }
+
+    protected function buildSettingsForm() {
+        $pdf = $this->getPdfModule();
+        $form = $this->modules->get('InputfieldForm');
+        $form->method = 'post';
+        $form->action = './';
+
+        $fieldset = $this->modules->get('InputfieldFieldset');
+        $fieldset->label = $this->_('Default PDF settings');
+
+        $f = $this->modules->get('InputfieldSelect');
+        $f->name = 'pdf_engine';
+        $f->label = $this->_('PDF Engine');
+        $f->addOptions(['mpdf' => 'mPDF', 'dompdf' => 'Dompdf']);
+        $f->value = $pdf ? $pdf->pdf_engine : 'mpdf';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $this->modules->get('InputfieldSelect');
+        $f->name = 'paper_size';
+        $f->label = $this->_('Paper Size');
+        $f->addOptions(['A4' => 'A4', 'A3' => 'A3', 'A5' => 'A5', 'Letter' => 'Letter', 'Legal' => 'Legal', 'Ledger' => 'Ledger']);
+        $f->value = $pdf ? $pdf->paper_size : 'Letter';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $this->modules->get('InputfieldSelect');
+        $f->name = 'orientation';
+        $f->label = $this->_('Orientation');
+        $f->addOptions(['portrait' => 'Portrait', 'landscape' => 'Landscape']);
+        $f->value = $pdf ? $pdf->orientation : 'portrait';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $this->modules->get('InputfieldSelect');
+        $f->name = 'default_font';
+        $f->label = $this->_('Default Font');
+        $f->addOptions([
+            'dejavusans' => 'DejaVu Sans',
+            'helvetica' => 'Helvetica',
+            'arial' => 'Arial',
+            'times' => 'Times',
+            'courier' => 'Courier',
+        ]);
+        $f->value = $pdf ? $pdf->default_font : 'helvetica';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $this->modules->get('InputfieldInteger');
+        $f->name = 'font_size';
+        $f->label = $this->_('Font Size');
+        $f->min = 6;
+        $f->max = 24;
+        $f->value = $pdf ? $pdf->font_size : 12;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $this->modules->get('InputfieldInteger');
+        $f->name = 'image_dpi';
+        $f->label = $this->_('Image DPI');
+        $f->min = 72;
+        $f->max = 300;
+        $f->value = $pdf ? $pdf->image_dpi : 96;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $this->modules->get('InputfieldCheckbox');
+        $f->name = 'enable_images';
+        $f->label = $this->_('Enable Images');
+        $f->checked = $pdf ? (bool)$pdf->enable_images : true;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $this->modules->get('InputfieldCheckbox');
+        $f->name = 'enable_footer';
+        $f->label = $this->_('Enable Footer');
+        $f->checked = $pdf ? (bool)$pdf->enable_footer : true;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $form->add($fieldset);
+
+        $submit = $this->modules->get('InputfieldSubmit');
+        $submit->name = 'submit_settings';
+        $submit->value = $this->_('Save settings');
+        $form->add($submit);
+
+        return $form;
+    }
+
+    protected function savePdfConfig(InputfieldForm $form) {
+        $currentConfig = $this->modules->getConfig('PagePdf');
+        $config = [];
+
+        if($currentConfig instanceof WireData) {
+            $config = $currentConfig->getArray();
+        } else if(is_array($currentConfig)) {
+            $config = $currentConfig;
+        }
+
+        $config = [
+            'margin_top' => $config['margin_top'] ?? 20,
+            'margin_right' => $config['margin_right'] ?? 10,
+            'margin_bottom' => $config['margin_bottom'] ?? 20,
+            'margin_left' => $config['margin_left'] ?? 10,
+            'margin_header' => $config['margin_header'] ?? 10,
+            'margin_footer' => $config['margin_footer'] ?? 10,
+            'enable_header' => $config['enable_header'] ?? 0,
+            'header_text' => $config['header_text'] ?? '',
+            'footer_text' => $config['footer_text'] ?? '{PAGENO} / {nbpg}',
+            'watermark_text' => $config['watermark_text'] ?? '',
+            'watermark_alpha' => $config['watermark_alpha'] ?? 0.1,
+            'enable_logging' => $config['enable_logging'] ?? 1,
+            'debug_mode' => $config['debug_mode'] ?? 0,
+            'enable_protection' => $config['enable_protection'] ?? 0,
+            'user_password' => $config['user_password'] ?? '',
+            'owner_password' => $config['owner_password'] ?? '',
+            'pdf_engine' => $form->get('pdf_engine')->value,
+            'paper_size' => $form->get('paper_size')->value,
+            'orientation' => $form->get('orientation')->value,
+            'default_font' => $form->get('default_font')->value,
+            'font_size' => (int)$form->get('font_size')->value,
+            'image_dpi' => (int)$form->get('image_dpi')->value,
+            'enable_images' => $form->get('enable_images')->value ? 1 : 0,
+            'enable_footer' => $form->get('enable_footer')->value ? 1 : 0,
+        ];
+
+        $this->modules->saveConfig('PagePdf', $config);
+    }
+
+    protected function renderSetupStatus() {
+        $out = '<h2>' . $this->_('Generator setup') . '</h2>';
+        $out .= '<ul>';
+        $out .= '<li>' . $this->_('Template file') . ': ' . ($this->generatorFileExists() ? $this->_('ready') : $this->_('missing')) . '</li>';
+        $out .= '<li>' . $this->_('ProcessWire template') . ': ' . ($this->generatorTemplateExists() ? $this->_('ready') : $this->_('missing')) . '</li>';
+        $out .= '<li>' . $this->_('Frontend page') . ': ' . ($this->generatorPageExists() ? $this->esc($this->getGeneratorPageUrl()) : $this->_('missing')) . '</li>';
+        $out .= '</ul>';
+
+        return $out;
+    }
+
+    protected function renderSetupForm() {
+        $form = $this->modules->get('InputfieldForm');
+        $form->method = 'post';
+        $form->action = './';
+
+        $markup = $this->modules->get('InputfieldMarkup');
+        $markup->value = '<p>' . $this->_('This creates the pdf-generator template file, matching ProcessWire template, and a /pdf/ page when they do not already exist.') . '</p>';
+        $form->add($markup);
+
+        $submit = $this->modules->get('InputfieldSubmit');
+        $submit->name = 'setup_all';
+        $submit->value = $this->_('Create or repair generator');
+        $form->add($submit);
+
+        return $form->render();
+    }
+
+    protected function runSetup() {
+        $this->ensureGeneratorFile();
+        $template = $this->ensureGeneratorTemplate();
+        $this->ensureGeneratorPage($template);
+        $this->message($this->_('Generator setup complete.'));
+    }
+
+    protected function ensureGeneratorFile() {
+        $source = dirname(__FILE__) . '/pdf-generator.php';
+        $target = $this->config->paths->templates . self::TEMPLATE_NAME . '.php';
+
+        if(file_exists($target)) {
+            return;
+        }
+
+        if(!file_exists($source)) {
+            throw new WireException($this->_('Source generator file not found.'));
+        }
+
+        if(!is_writable($this->config->paths->templates)) {
+            throw new WireException($this->_('Templates directory is not writable.'));
+        }
+
+        if(!copy($source, $target)) {
+            throw new WireException($this->_('Unable to copy generator template file.'));
+        }
+    }
+
+    protected function ensureGeneratorTemplate() {
+        $template = $this->templates->get(self::TEMPLATE_NAME);
+
+        if($template && $template->id) {
+            return $template;
+        }
+
+        $fieldgroup = $this->fieldgroups->get(self::TEMPLATE_NAME);
+
+        if(!$fieldgroup || !$fieldgroup->id) {
+            $fieldgroup = new Fieldgroup();
+            $fieldgroup->name = self::TEMPLATE_NAME;
+            $fieldgroup->add($this->fields->get('title'));
+            $fieldgroup->save();
+        }
+
+        $template = new Template();
+        $template->name = self::TEMPLATE_NAME;
+        $template->fieldgroup = $fieldgroup;
+        $template->noGlobal = 1;
+        $template->slashUrls = 1;
+        $template->save();
+
+        return $template;
+    }
+
+    protected function ensureGeneratorPage(Template $template) {
+        $page = $this->pages->get('/' . self::PAGE_NAME . '/');
+
+        if($page && $page->id) {
+            if($page->template->name !== self::TEMPLATE_NAME) {
+                throw new WireException($this->_('A /pdf/ page already exists with another template.'));
+            }
+
+            return $page;
+        }
+
+        $page = new Page();
+        $page->template = $template;
+        $page->parent = $this->pages->get('/');
+        $page->name = self::PAGE_NAME;
+        $page->title = 'PDF Generator';
+        $page->status = Page::statusHidden;
+        $page->save();
+
+        return $page;
+    }
+
+    protected function renderTestForm() {
+        $generatorPage = $this->getGeneratorPage();
+
+        if(!$generatorPage || !$generatorPage->id) {
+            return '<p>' . $this->_('Create the generator first, then return here to test PDF output.') . '</p>';
+        }
+
+        $selectedPageId = $this->input->post('page_id') ? $this->input->post->int('page_id') : 0;
+        $form = $this->modules->get('InputfieldForm');
+        $form->method = 'post';
+        $form->action = './';
+
+        $field = $this->modules->get('InputfieldPageListSelect');
+        $field->name = 'page_id';
+        $field->label = $this->_('Page to render');
+        $field->value = $selectedPageId;
+        $form->add($field);
+
+        $submit = $this->modules->get('InputfieldSubmit');
+        $submit->name = 'submit_test';
+        $submit->value = $this->_('Build test link');
+        $form->add($submit);
+
+        $out = $form->render();
+
+        if($selectedPageId) {
+            $page = $this->pages->get($selectedPageId);
+
+            if($page && $page->id && $page->viewable()) {
+                $url = $generatorPage->url . '?id=' . $page->id;
+                $out .= '<p><a class="ui-button ui-priority-primary" target="_blank" rel="noopener" href="' . $this->esc($url) . '">' . $this->_('Open test PDF') . '</a></p>';
+            } else {
+                $out .= '<p class="ui-state-error">' . $this->_('Selected page is not viewable.') . '</p>';
+            }
+        }
+
+        return $out;
+    }
+
+    protected function getPdfModule() {
+        return $this->modules->get('PagePdf');
+    }
+
+    protected function generatorFileExists() {
+        return file_exists($this->config->paths->templates . self::TEMPLATE_NAME . '.php');
+    }
+
+    protected function generatorTemplateExists() {
+        $template = $this->templates->get(self::TEMPLATE_NAME);
+        return $template && $template->id;
+    }
+
+    protected function generatorPageExists() {
+        $page = $this->getGeneratorPage();
+        return $page && $page->id && $page->template->name === self::TEMPLATE_NAME;
+    }
+
+    protected function getGeneratorPage() {
+        return $this->pages->get('/' . self::PAGE_NAME . '/');
+    }
+
+    protected function getGeneratorPageUrl() {
+        $page = $this->getGeneratorPage();
+        return $page && $page->id && $page->template->name === self::TEMPLATE_NAME ? $page->url : '';
+    }
+
+    protected function classExists($className) {
+        return class_exists($className);
+    }
+
+    protected function esc($value) {
+        return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    }
+}

@@ -1,0 +1,808 @@
+<?php namespace ProcessWire;
+
+/**
+ * PagePdf Module
+ *
+ * Converts ProcessWire pages to PDF documents using mPDF or Dompdf
+ * Full UTF-8/Cyrillic character support with multiple font options
+ *
+ * @author Maxim Semenov <maxim@smnv.org> (smnv.org)
+ * @license MIT
+ * @version 3.0.0
+ *
+ */
+
+class PagePdf extends WireData implements Module, ConfigurableModule {
+
+    public static function getModuleInfo() {
+        return [
+            'title' => 'PagePdf',
+            'version' => '3.0.0',
+            'summary' => 'Convert ProcessWire pages to PDF documents with advanced typography support',
+            'author' => 'Maxim Semenov',
+            'href'     => 'https://smnv.org',
+            'autoload' => true,
+            'singular' => true,
+            'requires' => 'ProcessWire>=3.0.0',
+            'installs' => ['ProcessPagePdfWizard'],
+        ];
+    }
+
+    /**
+     * Default configuration
+     */
+    public function __construct() {
+        parent::__construct();
+
+        $this->set('pdf_engine', 'mpdf');
+        $this->set('paper_size', 'Letter');
+        $this->set('orientation', 'portrait');
+        $this->set('margin_top', 20);
+        $this->set('margin_right', 10);
+        $this->set('margin_bottom', 20);
+        $this->set('margin_left', 10);
+        $this->set('margin_header', 10);
+        $this->set('margin_footer', 10);
+        $this->set('default_font', 'helvetica');
+        $this->set('font_size', 12);
+        $this->set('enable_images', true);
+        $this->set('image_dpi', 96);
+        $this->set('enable_header', false);
+        $this->set('enable_footer', true);
+        $this->set('header_text', '');
+        $this->set('footer_text', '{PAGENO} / {nbpg}');
+        $this->set('watermark_text', '');
+        $this->set('watermark_alpha', 0.1);
+        $this->set('enable_logging', true);
+        $this->set('debug_mode', false);
+        $this->set('enable_protection', false);
+        $this->set('user_password', '');
+        $this->set('owner_password', '');
+    }
+
+    /**
+     * Initialize the module
+     */
+    public function init() {
+        $this->loadComposerAutoload();
+        $this->addHook('Page::toPdf', $this, 'hookPageToPdf');
+        $this->addHook('Page::renderPdf', $this, 'hookPageRenderPdf');
+    }
+
+    /**
+     * Load composer autoload
+     * Checks module directory first, then root directory
+     */
+    protected function loadComposerAutoload() {
+        $autoloadPaths = [];
+
+        // 1. Check module's own vendor directory (recommended)
+        $moduleDir = dirname(__FILE__);
+        $autoloadPaths[] = $moduleDir . '/vendor/autoload.php';
+
+        // 2. Check root vendor directory (legacy support)
+        if($this->config && $this->config->paths && $this->config->paths->root) {
+            $autoloadPaths[] = rtrim($this->config->paths->root, '/') . '/vendor/autoload.php';
+        }
+
+        if(isset($_SERVER['DOCUMENT_ROOT'])) {
+            $autoloadPaths[] = rtrim($_SERVER['DOCUMENT_ROOT'], '/') . '/vendor/autoload.php';
+        }
+
+        // 3. Check parent directories as fallback
+        $autoloadPaths[] = dirname(dirname(dirname($moduleDir))) . '/vendor/autoload.php';
+
+        // Remove duplicates
+        $autoloadPaths = array_unique($autoloadPaths);
+
+        foreach($autoloadPaths as $path) {
+            if(file_exists($path)) {
+                require_once($path);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Ready
+     */
+    public function ready() {
+        if ($this->pdf_engine === 'mpdf' && !$this->isMpdfInstalled()) {
+            $this->error('mPDF library not found. Install via: composer require mpdf/mpdf');
+        } elseif ($this->pdf_engine === 'dompdf' && !$this->isDompdfInstalled()) {
+            $this->error('Dompdf library not found. Install via: composer require dompdf/dompdf');
+        }
+
+        $cacheDir = $this->getCacheDir();
+        if(!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+    }
+
+    /**
+     * Get cache directory
+     */
+    protected function getCacheDir() {
+        $moduleDir = dirname(__FILE__);
+        $siteDir = dirname(dirname($moduleDir));
+        return $siteDir . '/assets/cache/PagePdf/';
+    }
+
+    /**
+     * Hook: Page::toPdf()
+     */
+    public function hookPageToPdf(HookEvent $event) {
+        $page = $event->object;
+        $options = $event->arguments(0) ?: [];
+
+        if($this->wire('session')->getFor('PagePdf', 'rendering')) {
+            $this->log("PREVENTED RECURSIVE PDF | Page: {$page->title} (ID: {$page->id})", 'warning');
+            return;
+        }
+
+        $startTime = microtime(true);
+
+        // Prepare log data
+        $filename = $options['filename'] ?? $this->sanitizer->pageName($page->title) . '.pdf';
+        $paperSize = $options['paper_size'] ?? $this->paper_size;
+        $orientation = $options['orientation'] ?? $this->orientation;
+        $engine = $options['engine'] ?? $this->pdf_engine;
+
+        try {
+            $pdf = $this->generatePdf($page, $options);
+
+            if ($pdf) {
+                $inline = isset($options['inline']) ? $options['inline'] : false;
+
+                $executionTime = round(microtime(true) - $startTime, 3);
+
+                // Log everything in one line
+                $this->log("✓ PDF Generated | {$page->title} (ID: {$page->id}) | Template: {$page->template->name} | File: {$filename} | Paper: {$paperSize}/{$orientation} | Engine: {$engine} | Time: {$executionTime}s");
+
+                $this->outputPdf($pdf, $filename, $inline);
+                exit;
+            } else {
+                $executionTime = round(microtime(true) - $startTime, 3);
+                $this->log("✗ PDF Failed | {$page->title} (ID: {$page->id}) | Time: {$executionTime}s", 'error');
+                $this->showError("PDF generation failed");
+            }
+        } catch(\Exception $e) {
+            $executionTime = round(microtime(true) - $startTime, 3);
+            $this->log("✗ PDF Error | {$page->title} (ID: {$page->id}) | Exception: {$e->getMessage()} | Time: {$executionTime}s", 'error');
+            $this->showError($e->getMessage(), $e);
+        }
+    }
+
+    /**
+     * Hook: Page::renderPdf()
+     */
+    public function hookPageRenderPdf(HookEvent $event) {
+        $page = $event->object;
+        $options = $event->arguments(0) ?: [];
+
+        $startTime = microtime(true);
+
+        try {
+            $pdf = $this->generatePdf($page, $options);
+            if ($pdf) {
+                $executionTime = round(microtime(true) - $startTime, 3);
+                $this->log("✓ PDF Rendered | {$page->title} (ID: {$page->id}) | Time: {$executionTime}s");
+                $event->return = $this->getPdfOutput($pdf);
+            }
+        } catch(\Exception $e) {
+            $executionTime = round(microtime(true) - $startTime, 3);
+            $this->log("✗ PDF Render Error | {$page->title} (ID: {$page->id}) | Exception: {$e->getMessage()} | Time: {$executionTime}s", 'error');
+            throw $e;
+        }
+    }
+
+    /**
+     * Generate PDF
+     */
+    protected function generatePdf($page, $options = []) {
+        $engine = $options['engine'] ?? $this->pdf_engine;
+        $this->log("Using PDF engine: $engine");
+
+        if ($engine === 'mpdf') {
+            return $this->generateMpdf($page, $options);
+        } else {
+            return $this->generateDompdf($page, $options);
+        }
+    }
+
+    /**
+     * Generate PDF using mPDF
+     */
+    protected function generateMpdf($page, $options = []) {
+        if (!$this->isMpdfInstalled()) {
+            $this->log("mPDF not installed", 'error');
+            return false;
+        }
+
+        try {
+            $html = $this->getPageHtml($page, $options);
+            $enableImages = $this->getBoolOption($options, 'enable_images', $this->enable_images);
+
+            $config = [
+                'mode' => 'utf-8',
+                'format' => $options['paper_size'] ?? $this->paper_size,
+                'orientation' => strtoupper(substr($options['orientation'] ?? $this->orientation, 0, 1)),
+                'margin_left' => $options['margin_left'] ?? $this->margin_left,
+                'margin_right' => $options['margin_right'] ?? $this->margin_right,
+                'margin_top' => $options['margin_top'] ?? $this->margin_top,
+                'margin_bottom' => $options['margin_bottom'] ?? $this->margin_bottom,
+                'margin_header' => $options['margin_header'] ?? $this->margin_header,
+                'margin_footer' => $options['margin_footer'] ?? $this->margin_footer,
+                'default_font' => $options['default_font'] ?? $this->default_font,
+                'default_font_size' => $options['font_size'] ?? $this->font_size,
+                'img_dpi' => (int)($options['image_dpi'] ?? $this->image_dpi),
+                'tempDir' => $this->getCacheDir(),
+            ];
+
+            $mpdf = new \Mpdf\Mpdf($config);
+
+            if ($enableImages) {
+                $mpdf->showImageErrors = true;
+            } else {
+                $html = $this->stripImages($html);
+            }
+
+            if (!empty($options['watermark']) || !empty($this->watermark_text)) {
+                $mpdf->SetWatermarkText(
+                    $options['watermark'] ?? $this->watermark_text,
+                    $options['watermark_alpha'] ?? $this->watermark_alpha
+                );
+                $mpdf->showWatermarkText = true;
+            }
+
+            if ($this->enable_header || isset($options['header'])) {
+                $header = $options['header'] ?? $this->header_text;
+                if ($header) {
+                    // Replace custom variables
+                    $header = str_replace('{sitename}', $this->config->httpHost, $header);
+                    $header = str_replace('{DATE}', date('d.m.Y'), $header);
+                    $mpdf->SetHeader($header);
+                }
+            }
+
+            if ($this->enable_footer || isset($options['footer'])) {
+                $footer = $options['footer'] ?? $this->footer_text;
+                if ($footer) {
+                    // Replace custom variables
+                    $footer = str_replace('{sitename}', $this->config->httpHost, $footer);
+                    $footer = str_replace('{DATE}', date('d.m.Y'), $footer);
+                    $mpdf->SetFooter($footer);
+                }
+            }
+
+            // Security/Protection
+            if($this->enable_protection) {
+                $permissions = ['copy', 'print'];
+                $userPassword = $this->user_password ?: null;
+                $ownerPassword = $this->owner_password ?: null;
+
+                if($userPassword || $ownerPassword) {
+                    $mpdf->SetProtection($permissions, $userPassword, $ownerPassword);
+                }
+            }
+
+            $mpdf->WriteHTML($html);
+
+            return $mpdf;
+
+        } catch (\Mpdf\MpdfException $e) {
+            $this->log('mPDF Error: ' . $e->getMessage(), 'error');
+            throw $e;
+        }
+    }
+
+    /**
+     * Generate PDF using Dompdf
+     */
+    protected function generateDompdf($page, $options = []) {
+        if (!$this->isDompdfInstalled()) {
+            return false;
+        }
+
+        try {
+            $html = $this->getPageHtml($page, $options);
+            $enableImages = $this->getBoolOption($options, 'enable_images', $this->enable_images);
+
+            $dompdf = new \Dompdf\Dompdf();
+            $dompdf->getOptions()->set('isRemoteEnabled', true);
+            $dompdf->getOptions()->set('isHtml5ParserEnabled', true);
+            $dompdf->getOptions()->set('defaultFont', $options['default_font'] ?? $this->default_font);
+            $dompdf->getOptions()->set('dpi', (int)($options['image_dpi'] ?? $this->image_dpi));
+
+            if(!$enableImages) {
+                $html = $this->stripImages($html);
+            }
+
+            $dompdf->loadHtml($html);
+            $dompdf->setPaper($options['paper_size'] ?? $this->paper_size, $options['orientation'] ?? $this->orientation);
+            $dompdf->render();
+
+            return $dompdf;
+        } catch(\Exception $e) {
+            $this->log('Dompdf error: ' . $e->getMessage(), 'error');
+            throw $e;
+        }
+    }
+
+    /**
+     * Get HTML content from page
+     */
+    protected function getPageHtml($page, $options = []) {
+        if (isset($options['html'])) {
+            return $options['html'];
+        }
+
+        if (isset($options['template'])) {
+            $templatePath = $this->config->paths->templates . $options['template'];
+
+            if(!file_exists($templatePath)) {
+                throw new \Exception("Template file not found: {$options['template']}");
+            }
+
+            $html = $this->files->render($templatePath, [
+                'page' => $page,
+                'options' => $options
+            ]);
+
+            return $html;
+        }
+
+        $this->wire('session')->setFor('PagePdf', 'rendering', true);
+
+        try {
+            $html = $page->render();
+        } catch(\Exception $e) {
+            $this->log("Error rendering page: " . $e->getMessage(), 'error');
+            throw $e;
+        } finally {
+            $this->wire('session')->removeFor('PagePdf', 'rendering');
+        }
+
+        if (isset($options['filter']) && is_callable($options['filter'])) {
+            $html = $options['filter']($html);
+        }
+
+        return $html;
+    }
+
+    /**
+     * Output PDF to browser
+     */
+    protected function outputPdf($pdf, $filename, $inline = false) {
+        if ($pdf instanceof \Mpdf\Mpdf) {
+            $pdf->Output($filename, $inline ? 'I' : 'D');
+        } elseif ($pdf instanceof \Dompdf\Dompdf) {
+            $pdf->stream($filename, ['Attachment' => !$inline]);
+        }
+    }
+
+    /**
+     * Get PDF output as string
+     */
+    protected function getPdfOutput($pdf) {
+        if ($pdf instanceof \Mpdf\Mpdf) {
+            return $pdf->Output('', 'S');
+        } elseif ($pdf instanceof \Dompdf\Dompdf) {
+            return $pdf->output();
+        }
+        return '';
+    }
+
+    /**
+     * Read a boolean option with a module setting fallback
+     */
+    protected function getBoolOption(array $options, $name, $default) {
+        if(array_key_exists($name, $options)) {
+            return filter_var($options[$name], FILTER_VALIDATE_BOOLEAN);
+        }
+
+        return (bool)$default;
+    }
+
+    /**
+     * Remove image tags when image rendering is disabled
+     */
+    protected function stripImages($html) {
+        return preg_replace('/<img\b[^>]*>/i', '', $html);
+    }
+
+    /**
+     * Check if mPDF is installed
+     */
+    protected function isMpdfInstalled() {
+        return class_exists('\Mpdf\Mpdf');
+    }
+
+    /**
+     * Check if Dompdf is installed
+     */
+    protected function isDompdfInstalled() {
+        return class_exists('\Dompdf\Dompdf');
+    }
+
+    /**
+     * Save PDF to file
+     */
+    public function savePdf($page, $filepath, $options = []) {
+        $pdf = $this->generatePdf($page, $options);
+
+        if ($pdf) {
+            $output = $this->getPdfOutput($pdf);
+            return $this->files->filePutContents($filepath, $output);
+        }
+
+        return false;
+    }
+
+    /**
+     * Log message using ProcessWire logging system
+     */
+    protected function log($message, $type = 'log') {
+        if(!$this->enable_logging) return;
+
+        if($type === 'error') {
+            $this->log->save('pdf', "ERROR: $message");
+            $this->error($message);
+        } else if($type === 'warning') {
+            $this->log->save('pdf', "WARNING: $message");
+        } else {
+            $this->log->save('pdf', $message);
+        }
+    }
+
+    /**
+     * Show error page
+     */
+    protected function showError($message, $exception = null) {
+        if(!$this->debug_mode) {
+            echo "PDF generation failed. Check logs in Setup > Logs > pdf";
+        } else {
+            echo "<h1>PagePdf Error</h1>";
+            echo "<p><strong>Error:</strong> " . htmlspecialchars($message) . "</p>";
+
+            if($exception) {
+                echo "<h3>Exception:</h3>";
+                echo "<pre>" . htmlspecialchars($exception->__toString()) . "</pre>";
+            }
+
+            echo "<h3>Debug Info:</h3>";
+            echo "<ul>";
+            echo "<li>mPDF: " . ($this->isMpdfInstalled() ? 'Installed' : 'NOT Installed') . "</li>";
+            echo "<li>Dompdf: " . ($this->isDompdfInstalled() ? 'Installed' : 'NOT Installed') . "</li>";
+            echo "<li>PHP: " . PHP_VERSION . "</li>";
+            echo "<li>Cache: " . $this->getCacheDir() . "</li>";
+            echo "<li>Logs: Setup > Logs > pdf</li>";
+            echo "</ul>";
+        }
+        exit;
+    }
+
+    /**
+     * Module configuration
+     */
+    public static function getModuleConfigInputfields(array $data) {
+        $inputfields = new InputfieldWrapper();
+        $modules = wire('modules');
+
+        // Debug and Logging
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Debug & Logging');
+        $fieldset->collapsed = Inputfield::collapsedYes;
+
+        $f = $modules->get('InputfieldCheckbox');
+        $f->name = 'debug_mode';
+        $f->label = __('Debug Mode');
+        $f->description = __('Show detailed error messages');
+        $f->checked = isset($data['debug_mode']) ? $data['debug_mode'] : false;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldCheckbox');
+        $f->name = 'enable_logging';
+        $f->label = __('Enable Logging');
+        $f->description = __('Log PDF generation to ProcessWire logs (Setup > Logs > pdf)');
+        $f->notes = __('Disable to reduce log entries. Useful for debugging generation issues.');
+        $f->checked = isset($data['enable_logging']) ? $data['enable_logging'] : true;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        // Library Status
+        $pdfModule = wire('modules')->get('PagePdf');
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Library Status');
+        $fieldset->collapsed = Inputfield::collapsedYes;
+
+        $f = $modules->get('InputfieldMarkup');
+        $f->label = __('Installed PDF Libraries');
+
+        $status = '<ul style="line-height: 2em;">';
+
+        // mPDF Status
+        if($pdfModule && $pdfModule->isMpdfInstalled()) {
+            $status .= '<li><span style="color: green;">✓</span> <strong>mPDF</strong> - Installed and ready</li>';
+        } else {
+            $status .= '<li><span style="color: red;">✗</span> <strong>mPDF</strong> - Not installed<br>';
+            $status .= '<code style="background: #f5f5f5; padding: 5px; display: inline-block; margin-top: 5px;">composer require mpdf/mpdf</code></li>';
+        }
+
+        // Dompdf Status
+        if($pdfModule && $pdfModule->isDompdfInstalled()) {
+            $status .= '<li><span style="color: green;">✓</span> <strong>Dompdf</strong> - Installed and ready</li>';
+        } else {
+            $status .= '<li><span style="color: orange;">⚠</span> <strong>Dompdf</strong> - Not installed (optional)<br>';
+            $status .= '<code style="background: #f5f5f5; padding: 5px; display: inline-block; margin-top: 5px;">composer require dompdf/dompdf</code></li>';
+        }
+
+        $status .= '</ul>';
+
+        $f->value = $status;
+        $fieldset->add($f);
+        $inputfields->add($fieldset);
+
+        // PDF Engine
+        $f = $modules->get('InputfieldSelect');
+        $f->name = 'pdf_engine';
+        $f->label = __('PDF Engine');
+        $f->addOptions(['mpdf' => 'mPDF (recommended)', 'dompdf' => 'Dompdf']);
+        $f->value = isset($data['pdf_engine']) ? $data['pdf_engine'] : 'mpdf';
+        $f->columnWidth = 50;
+        $inputfields->add($f);
+
+        // Paper Settings
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Paper Settings');
+
+        $f = $modules->get('InputfieldSelect');
+        $f->name = 'paper_size';
+        $f->label = __('Default Paper Size');
+        $f->addOptions([
+            'A4' => 'A4 (210 × 297mm)',
+            'A3' => 'A3 (297 × 420mm)',
+            'A5' => 'A5 (148 × 210mm)',
+            'Letter' => 'Letter (8.5 × 11in)',
+            'Legal' => 'Legal (8.5 × 14in)',
+            'Ledger' => 'Ledger (11 × 17in)'
+        ]);
+        $f->value = isset($data['paper_size']) ? $data['paper_size'] : 'Letter';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldSelect');
+        $f->name = 'orientation';
+        $f->label = __('Default Orientation');
+        $f->addOptions(['portrait' => 'Portrait', 'landscape' => 'Landscape']);
+        $f->value = isset($data['orientation']) ? $data['orientation'] : 'portrait';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        // Margins
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Margins (mm)');
+        $fieldset->collapsed = Inputfield::collapsedYes;
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'margin_top';
+        $f->label = __('Top');
+        $f->value = isset($data['margin_top']) ? $data['margin_top'] : 20;
+        $f->columnWidth = 25;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'margin_right';
+        $f->label = __('Right');
+        $f->value = isset($data['margin_right']) ? $data['margin_right'] : 10;
+        $f->columnWidth = 25;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'margin_bottom';
+        $f->label = __('Bottom');
+        $f->value = isset($data['margin_bottom']) ? $data['margin_bottom'] : 20;
+        $f->columnWidth = 25;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'margin_left';
+        $f->label = __('Left');
+        $f->value = isset($data['margin_left']) ? $data['margin_left'] : 10;
+        $f->columnWidth = 25;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'margin_header';
+        $f->label = __('Header');
+        $f->value = isset($data['margin_header']) ? $data['margin_header'] : 10;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'margin_footer';
+        $f->label = __('Footer');
+        $f->value = isset($data['margin_footer']) ? $data['margin_footer'] : 10;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        // Typography
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Typography');
+
+        $f = $modules->get('InputfieldSelect');
+        $f->name = 'default_font';
+        $f->label = __('Default Font');
+        $f->description = __('Font family for PDF content');
+        $f->addOptions([
+            // Sans-serif fonts
+            'dejavusans' => 'DejaVu Sans (recommended for multilingual)',
+            'dejavusanscondensed' => 'DejaVu Sans Condensed',
+            'freesans' => 'FreeSans',
+            'arial' => 'Arial',
+            'helvetica' => 'Helvetica',
+            // Serif fonts
+            'dejavuserif' => 'DejaVu Serif',
+            'dejavuserifcondensed' => 'DejaVu Serif Condensed',
+            'freeserif' => 'FreeSerif',
+            'times' => 'Times',
+            'timesnewroman' => 'Times New Roman',
+            // Monospace fonts
+            'dejavusansmono' => 'DejaVu Sans Mono',
+            'freemono' => 'FreeMono',
+            'courier' => 'Courier',
+            'couriernew' => 'Courier New',
+        ]);
+        $f->value = isset($data['default_font']) ? $data['default_font'] : 'helvetica';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'font_size';
+        $f->label = __('Font Size (pt)');
+        $f->description = __('Base font size in points');
+        $f->value = isset($data['font_size']) ? $data['font_size'] : 12;
+        $f->inputType = 'number';
+        $f->min = 6;
+        $f->max = 24;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        // Images
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Images');
+        $fieldset->collapsed = Inputfield::collapsedYes;
+
+        $f = $modules->get('InputfieldCheckbox');
+        $f->name = 'enable_images';
+        $f->label = __('Enable Images');
+        $f->description = __('Include images in PDF');
+        $f->checked = isset($data['enable_images']) ? $data['enable_images'] : true;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldInteger');
+        $f->name = 'image_dpi';
+        $f->label = __('Image DPI');
+        $f->description = __('Image resolution (higher = better quality, larger file)');
+        $f->value = isset($data['image_dpi']) ? $data['image_dpi'] : 96;
+        $f->inputType = 'number';
+        $f->min = 72;
+        $f->max = 300;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        // Header & Footer
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Header & Footer');
+        $fieldset->description = __('Use {PAGENO}, {nbpg}, {DATE}, {sitename}');
+        $fieldset->collapsed = Inputfield::collapsedYes;
+
+        $f = $modules->get('InputfieldCheckbox');
+        $f->name = 'enable_header';
+        $f->label = __('Enable Header');
+        $f->checked = isset($data['enable_header']) ? $data['enable_header'] : false;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldText');
+        $f->name = 'header_text';
+        $f->label = __('Header Text');
+        $f->description = __('Variables: {PAGENO}, {DATE}, {sitename}');
+        $f->value = isset($data['header_text']) ? $data['header_text'] : '';
+        $f->showIf = 'enable_header=1';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldCheckbox');
+        $f->name = 'enable_footer';
+        $f->label = __('Enable Footer');
+        $f->checked = isset($data['enable_footer']) ? $data['enable_footer'] : true;
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldText');
+        $f->name = 'footer_text';
+        $f->label = __('Footer Text');
+        $f->description = __('Variables: {PAGENO}, {nbpg}, {DATE}, {sitename}');
+        $f->value = isset($data['footer_text']) ? $data['footer_text'] : '{PAGENO} / {nbpg}';
+        $f->showIf = 'enable_footer=1';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        // Watermark
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Watermark');
+        $fieldset->collapsed = Inputfield::collapsedYes;
+
+        $f = $modules->get('InputfieldText');
+        $f->name = 'watermark_text';
+        $f->label = __('Watermark Text');
+        $f->description = __('Leave empty to disable watermark');
+        $f->value = isset($data['watermark_text']) ? $data['watermark_text'] : '';
+        $f->columnWidth = 70;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldFloat');
+        $f->name = 'watermark_alpha';
+        $f->label = __('Watermark Opacity');
+        $f->description = __('0.0 (transparent) to 1.0 (opaque)');
+        $f->value = isset($data['watermark_alpha']) ? $data['watermark_alpha'] : 0.1;
+        $f->min = 0;
+        $f->max = 1;
+        $f->precision = 2;
+        $f->columnWidth = 30;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        // Security
+        $fieldset = $modules->get('InputfieldFieldset');
+        $fieldset->label = __('Security');
+        $fieldset->collapsed = Inputfield::collapsedYes;
+
+        $f = $modules->get('InputfieldCheckbox');
+        $f->name = 'enable_protection';
+        $f->label = __('Enable PDF Protection');
+        $f->description = __('Restrict copying and printing');
+        $f->checked = isset($data['enable_protection']) ? $data['enable_protection'] : false;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldText');
+        $f->name = 'user_password';
+        $f->label = __('User Password');
+        $f->description = __('Password to open PDF (leave empty for no password)');
+        $f->value = isset($data['user_password']) ? $data['user_password'] : '';
+        $f->showIf = 'enable_protection=1';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $f = $modules->get('InputfieldText');
+        $f->name = 'owner_password';
+        $f->label = __('Owner Password');
+        $f->description = __('Password for full permissions');
+        $f->value = isset($data['owner_password']) ? $data['owner_password'] : '';
+        $f->showIf = 'enable_protection=1';
+        $f->columnWidth = 50;
+        $fieldset->add($f);
+
+        $inputfields->add($fieldset);
+
+        return $inputfields;
+    }
+}
