@@ -8,7 +8,7 @@ This keeps PDF dependencies contained inside the module folder.
 
 ```bash
 cd /site/modules
-git clone https://github.com/mxmsmnv/WirePDF.git PagePdf
+git clone https://github.com/mxmsmnv/PagePdf.git PagePdf
 ```
 
 2. Install dependencies:

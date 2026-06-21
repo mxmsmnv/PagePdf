@@ -8,7 +8,7 @@
  *
  * @author Maxim Semenov <maxim@smnv.org> (smnv.org)
  * @license MIT
- * @version 3.0.0
+ * @version 3.0.1
  *
  */
 
@@ -17,7 +17,7 @@ class PagePdf extends WireData implements Module, ConfigurableModule {
     public static function getModuleInfo() {
         return [
             'title' => 'PagePdf',
-            'version' => '3.0.0',
+            'version' => '3.0.1',
             'summary' => 'Convert ProcessWire pages to PDF documents with advanced typography support',
             'author' => 'Maxim Semenov',
             'href'     => 'https://smnv.org',

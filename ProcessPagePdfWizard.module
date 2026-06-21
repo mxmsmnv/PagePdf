@@ -12,7 +12,7 @@ class ProcessPagePdfWizard extends Process {
         return [
             'title' => 'PagePdf Wizard',
             'summary' => 'Guided setup for the PagePdf module.',
-            'version' => '3.0.0',
+            'version' => '3.0.1',
             'author' => 'Maxim Semenov',
             'requires' => 'PagePdf',
             'permission' => 'module-admin',

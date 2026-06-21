@@ -2,9 +2,9 @@
 
 A ProcessWire module for generating PDF documents from pages with mPDF or Dompdf. It supports UTF-8/Cyrillic text, configurable typography, headers, footers, watermarks, password protection, and common ProcessWire field types including ProFields.
 
-![PagePdf](assets/PagePdf.png)
+![PagePdf](https://raw.githubusercontent.com/mxmsmnv/PagePdf/main/assets/PagePdf.png)
 
-**Version:** 3.0.0<br>
+**Version:** 3.0.1<br>
 **Author:** Maxim Semenov<br>
 **Website:** [smnv.org](https://smnv.org)<br>
 **Email:** [maxim@smnv.org](mailto:maxim@smnv.org)

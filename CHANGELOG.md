@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.0.1] - 2026-06-21
+
+### Changed
+- Updated the README image to use the public `mxmsmnv/PagePdf` raw GitHub URL.
+- Updated repository links and module metadata versions to `3.0.1`.
+
+---
+
 ## [3.0.0] - 2026-06-21
 
 ### Breaking
@@ -74,5 +82,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Links
 
-- GitHub: https://github.com/mxmsmnv/WirePDF
+- GitHub: https://github.com/mxmsmnv/PagePdf
 - Author: Maxim Semenov — maxim@smnv.org — smnv.org
